@@ -2,7 +2,7 @@ name: "Changelog: Apply PR changelog to ST14.yml"
 
 on:
   pull_request:
-    types: [opened, edited, reopened, synchronize]
+    types: [opened, edited, reopened]
 
 permissions:
   contents: write
@@ -19,11 +19,23 @@ jobs:
     if: github.event.pull_request.head.repo.full_name == github.repository
 
     steps:
+      - name: Require the CHANGELOG_PAT secret
+        env:
+          PAT: ${{ secrets.CHANGELOG_PAT }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PAT" ]; then
+            echo "::error::Repository secret CHANGELOG_PAT is not set. Without it the commit" \
+                 "would be pushed with GITHUB_TOKEN, which would not re-trigger CI."
+            exit 1
+          fi
+
       - name: Checkout PR branch
         uses: actions/checkout@v4
         with:
           repository: ${{ github.event.pull_request.head.repo.full_name }}
           ref: ${{ github.event.pull_request.head.ref }}
+          token: ${{ secrets.CHANGELOG_PAT }}
 
       - name: Apply PR changelog to ST14.yml
         id: apply
@@ -55,5 +67,5 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add Resources/Changelog/ST14.yml
-          git commit -m "chore: sync ST14 changelog from PR #$PR_NUMBER description [skip ci]"
+          git commit -m "chore: sync ST14 changelog from PR #$PR_NUMBER description"
           git push origin "HEAD:$PR_BRANCH"
