@@ -5,12 +5,15 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 import re
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 
 HEADER_RE = re.compile(r"(?mi)^\s*(?::cl:|🆑)\s*$")
 COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+HEADING_RE = re.compile(r"^#{1,6}\s")
 
 SECTION_LABELS = {
     "добавлено": "Add",
@@ -80,6 +83,9 @@ def parse_changes(body: str) -> list[dict[str, str]]:
     current_type: str | None = None
 
     for raw_line in lines[marker_index + 1 :]:
+        if HEADING_RE.match(raw_line):
+            break
+
         stripped = raw_line.strip()
         if not stripped:
             current_type = None
@@ -147,6 +153,180 @@ def update_yaml(args: argparse.Namespace) -> int:
         encoding="utf-8",
     )
     print(f"Updated changelog: {changelog_path}")
+    return 0
+
+
+def _needs_quotes(value: str) -> bool:
+    """Mirror the quoting style of Resources/Changelog/Changelog.yml."""
+    if value == "" or value != value.strip():
+        return True
+
+    if any(char in value for char in "\n\r\t"):
+        return True
+
+    if value[0] in "-?:,[]{}#&*!|>'\"%@`":
+        return True
+
+    if ": " in value or value.endswith(":"):
+        return True
+
+    if " #" in value:
+        return True
+
+    if value.lower() in {"y", "n", "yes", "no", "true", "false", "on", "off", "null", "~"}:
+        return True
+
+    try:
+        float(value)
+        return True
+    except ValueError:
+        return False
+
+
+def yaml_scalar(value: object) -> str:
+    """Render a value as a YAML scalar, plain unless it would change meaning."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+
+    if isinstance(value, int):
+        return str(value)
+
+    if isinstance(value, datetime):
+        return f"'{value.isoformat()}'"
+
+    text = str(value)
+    if not _needs_quotes(text):
+        return text
+
+    return "'" + text.replace("'", "''") + "'"
+
+
+def _emit_change(change: dict[str, str]) -> list[str]:
+    return [
+        f"  - message: {yaml_scalar(change['message'])}",
+        f"    type: {yaml_scalar(change['type'])}",
+    ]
+
+
+def _emit_entry(entry: dict[str, object]) -> list[str]:
+    lines = [f"- author: {yaml_scalar(entry['author'])}", "  changes:"]
+
+    for change in entry.get("changes", []):
+        lines.extend(_emit_change(change))
+
+    lines.append(f"  id: {yaml_scalar(entry['id'])}")
+
+    if entry.get("time") is not None:
+        lines.append(f"  time: '{entry['time']}'")
+
+    if entry.get("url") is not None:
+        lines.append(f"  url: {yaml_scalar(entry['url'])}")
+
+    return lines
+
+
+def render_changelog_file(data: dict[str, object]) -> str:
+    """Serialize the changelog document in the Resources/Changelog house style."""
+    entries = data.get("Entries") or []
+    lines: list[str] = []
+
+    for key, value in data.items():
+        if key == "Entries":
+            continue
+
+        lines.append(f"{key}: {yaml_scalar(value)}")
+
+    lines.append("Entries:")
+    for entry in entries:
+        lines.extend(_emit_entry(entry))
+
+    return "\n".join(lines) + "\n"
+
+
+def _load_changelog(changelog_path: Path) -> dict[str, object]:
+    import yaml
+
+    if not changelog_path.exists() or changelog_path.stat().st_size == 0:
+        return {}
+
+    return yaml.safe_load(changelog_path.read_text(encoding="utf-8")) or {}
+
+
+def write_github_output(name: str, value: str) -> None:
+    output_path = os.environ.get("GITHUB_OUTPUT")
+    if not output_path:
+        return
+
+    with open(output_path, "a", encoding="utf-8") as output:
+        output.write(f"{name}={value}\n")
+
+
+def apply_yaml(args: argparse.Namespace) -> int:
+    """Idempotently upsert (or drop) this PR's entry in the changelog file.
+
+    Keyed on the entry `url`, so re-running after a PR body edit rewrites the
+    existing entry instead of appending a duplicate.
+    """
+    changes = parse_changes(load_body(args))
+    changelog_path = Path(args.changelog_file)
+    data = _load_changelog(changelog_path)
+
+    time = args.time or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.0000000+00:00")
+
+    entries = list(data.get("Entries") or [])
+    url = f"https://github.com/{args.repo}/pull/{args.pr}"
+    existing_index = next(
+        (index for index, entry in enumerate(entries) if entry.get("url") == url),
+        None,
+    )
+
+    if not changes:
+        if existing_index is None:
+            print("No changelog entries in PR body and none stored; nothing to do.")
+            write_github_output("changed", "false")
+            return 0
+
+        entries.pop(existing_index)
+        print(f"Removed changelog entry for PR #{args.pr}.")
+    elif existing_index is None:
+        next_id = max((entry.get("id", 0) or 0 for entry in entries), default=0) + 1
+        entries.append(
+            {
+                "author": args.author,
+                "changes": changes,
+                "id": next_id,
+                "time": time,
+                "url": url,
+            }
+        )
+        print(f"Added changelog entry {next_id} for PR #{args.pr}.")
+    else:
+        entry = entries[existing_index]
+        if entry.get("changes") == changes and entry.get("author") == args.author:
+            print(f"Changelog entry for PR #{args.pr} is already up to date.")
+            write_github_output("changed", "false")
+            return 0
+
+        entry["changes"] = changes
+        entry["author"] = args.author
+        entry["url"] = url
+        print(f"Updated changelog entry {entry.get('id')} for PR #{args.pr}.")
+
+    data["Entries"] = entries
+    if "AdminOnly" not in data:
+        data["AdminOnly"] = False
+
+    rendered = render_changelog_file(data)
+    previous = changelog_path.read_text(encoding="utf-8") if changelog_path.exists() else ""
+
+    if rendered == previous:
+        print("Changelog file unchanged.")
+        write_github_output("changed", "false")
+        return 0
+
+    changelog_path.write_text(rendered, encoding="utf-8")
+    print(f"Wrote {changelog_path}.")
+    write_github_output("changed", "true")
     return 0
 
 
@@ -246,6 +426,22 @@ def build_parser() -> argparse.ArgumentParser:
     update_parser.add_argument("--time", required=True)
     update_parser.add_argument("--changelog-file", required=True)
     update_parser.set_defaults(func=update_yaml)
+
+    apply_parser = subparsers.add_parser(
+        "apply-yaml",
+        parents=[common],
+        help="Idempotently upsert this PR's :cl: block into a changelog file.",
+    )
+    apply_parser.add_argument("--author", required=True)
+    apply_parser.add_argument("--pr", required=True, type=int)
+    apply_parser.add_argument("--repo", required=True, help="owner/name, used to build the entry url")
+    apply_parser.add_argument("--changelog-file", required=True)
+    apply_parser.add_argument(
+        "--time",
+        default=None,
+        help="Timestamp for new entries (defaults to now, UTC).",
+    )
+    apply_parser.set_defaults(func=apply_yaml)
 
     discord_parser = subparsers.add_parser("render-discord", parents=[common])
     discord_parser.add_argument("--author", required=True)

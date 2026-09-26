@@ -1,0 +1,63 @@
+name: "Changelog: Apply PR changelog to ST14.yml"
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: changelog-st14-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  apply-changelog:
+    name: Sync ST14.yml with the PR changelog
+    runs-on: ubuntu-latest
+
+    if: github.event.pull_request.head.repo.full_name == github.repository
+
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - name: Apply PR changelog to ST14.yml
+        id: apply
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          printf '%s' "$PR_BODY" | base64 -w0 > /tmp/pr_body.b64
+
+          python3 Tools/pr_changelog.py apply-yaml \
+            --body-base64 "$(cat /tmp/pr_body.b64)" \
+            --author "$PR_AUTHOR" \
+            --pr "$PR_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --changelog-file Resources/Changelog/ST14.yml
+
+      - name: Commit and push
+        if: steps.apply.outputs.changed == 'true'
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add Resources/Changelog/ST14.yml
+          git commit -m "chore: sync ST14 changelog from PR #$PR_NUMBER description"
+
+          # actions/checkout leaves a detached HEAD when `ref` is a branch, so name the
+          # destination ref explicitly. This push uses GITHUB_TOKEN, and GitHub does not
+          # trigger workflows from GITHUB_TOKEN pushes, so it cannot re-run this job.
+          git push origin "HEAD:$PR_BRANCH"
