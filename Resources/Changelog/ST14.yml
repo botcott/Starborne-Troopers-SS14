@@ -6,3 +6,10 @@ Entries:
     type: Add
   id: 0
   time: '2026-07-1T00:00:00.0000000+00:00'
+- author: botcott
+  changes:
+  - message: Crowbars now randomly spawn in maintenance lockers.
+    type: Add
+  id: 1
+  time: '2026-09-26T19:54:34.0000000+00:00'
+  url: https://github.com/botcott/Starborne-Troopers-SS14/pull/1
