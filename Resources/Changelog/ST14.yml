@@ -6,3 +6,16 @@ Entries:
     type: Add
   id: 0
   time: '2026-07-1T00:00:00.0000000+00:00'
+- author: botcott
+  changes:
+  - message: Crowbars now randomly spawn in maintenance lockers.
+    type: Add
+  - message: Crowbars no longer spawn in maintenance crates.
+    type: Remove
+  - message: Crowbar spawn rates have been increased for tool lockers.
+    type: Tweak
+  - message: Crowbars no longer accidentally spawn in microwaves.
+    type: Fix
+  id: 1
+  time: '2026-09-26T20:02:28.0000000+00:00'
+  url: https://github.com/botcott/Starborne-Troopers-SS14/pull/2
